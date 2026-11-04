@@ -1,0 +1,14 @@
+# Entorno virtual
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editores y sistema
+.vscode/
+.idea/
+.DS_Store
