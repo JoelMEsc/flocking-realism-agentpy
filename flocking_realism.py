@@ -8,11 +8,13 @@ Código del modelo, sin el análisis. Es el mismo código de `flocking_realism.i
 2. Modelo extendido por etapas: referencia con escala realista (3.0), percepción (3.1),
    roles (3.2), energía (3.3) y modelo completo (3.4).
 3. Métricas y KPIs (secciones 3.0 y 5).
-4. Calibración (4.1) e infraestructura y configuraciones de los experimentos (6).
-5. Pruebas de verificación (7.1).
+4. Animación con slider del modelo (3.4).
+5. Calibración (4.1) e infraestructura y configuraciones de los experimentos (6).
+6. Pruebas de verificación (7.1).
 
 Uso desde la línea de comandos:
     python flocking_realism.py                             # una corrida del modelo completo y sus KPIs
+    python flocking_realism.py --animacion                 # animación con slider en animacion.html
     python flocking_realism.py --pruebas                   # pruebas de verificación del código
     python flocking_realism.py --experimentos              # carga los experimentos E1 a E6 y muestra un resumen
     python flocking_realism.py --experimentos --recalcular # vuelve a correr los experimentos (~30 min)
@@ -598,6 +600,70 @@ ModeloExtendido = ModeloEnergia
 parametros_extendido = dict(parametros_energia)
 
 # ============================================================================
+# Animación del modelo (sección 3.4)
+# ============================================================================
+
+COLORES_ROL = {'lider': 'tab:red', 'adulto': 'tab:blue', 'juvenil': 'tab:orange'}
+
+
+def centro_parvada(m):
+    """ Centro del grupo mayor en el torus: promedio de los desplazamientos desde una de sus aves. """
+    d = distancias_toroidales(m)
+    _, etiquetas = connected_components(csr_matrix(d < m.p.outer_radius), directed=False)
+    pos = np.array(list(m.space.positions.values()))
+    grupo = pos[etiquetas == np.bincount(etiquetas).argmax()]
+    return grupo[0] + desplazamiento_toroidal(grupo[0], grupo, m.p.size).mean(axis=0)
+
+
+def cuadro_parvada(m, ax, ventana=60):
+    """ Dibuja un paso de la simulación con una cámara que sigue al grupo mayor.
+    Color: rol del ave. Opacidad: energía (más transparente = más cansada). """
+    ax.clear()
+    centro = centro_parvada(m)
+    for rol, color in COLORES_ROL.items():
+        aves = [a for a in m.agents if getattr(a, 'role', 'adulto') == rol]
+        if not aves:
+            continue
+        rel = desplazamiento_toroidal(centro, np.array([a.pos for a in aves]), m.p.size)
+        rumbo = np.array([a.heading for a in aves])
+        energia = np.array([getattr(a, 'energy', 1.0) for a in aves])
+        ax.quiver(rel[:, 0], rel[:, 1], rumbo[:, 0], rumbo[:, 1], color=color, alpha=0.25 + 0.75 * energia,
+                  angles='xy', scale=45, width=0.005, label=rol)
+    kpi = metricas_parvada(m)
+    texto = f"t = {m.t * m.p.dt:.1f} s   polarización = {kpi['polarizacion']:.2f}   grupos = {kpi['n_grupos']}"
+    if hasattr(m.agents[0], 'energy'):
+        texto += f"   energía media = {np.mean([a.energy for a in m.agents]):.2f}"
+    ax.set(xlim=(-ventana, ventana), ylim=(-ventana, ventana), aspect='equal',
+           xlabel='m (relativo al centro del grupo mayor)', title=texto)
+    ax.legend(loc='upper right', fontsize=8)
+
+
+def animar(Modelo, parametros, pasos=300, cada=2, archivo=None):
+    """ Animación con slider (como la del ejemplo de AgentPy) de `pasos` pasos, dibujando uno de
+    cada `cada`. Devuelve el HTML; si se da `archivo`, también lo guarda como página web. """
+    import matplotlib.pyplot as plt
+    from matplotlib import animation
+
+    m = Modelo(dict(parametros, steps=pasos))
+    m.sim_setup()
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    def cuadro(i):
+        if i > 0:
+            for _ in range(cada):
+                if m.running:
+                    m.sim_step()
+        cuadro_parvada(m, ax)
+
+    anim = animation.FuncAnimation(fig, cuadro, frames=pasos // cada + 1, interval=50)
+    html = anim.to_jshtml(fps=20)
+    plt.close(fig)
+    if archivo:
+        with open(archivo, 'w') as f:
+            f.write(f'<html><head><meta charset="utf-8"><title>Flocking</title></head><body>{html}</body></html>')
+    return html
+
+# ============================================================================
 # 6. KPIs y registro de datos (sección 5)
 # ============================================================================
 
@@ -970,6 +1036,8 @@ def ejecutar_pruebas():
 
 def main():
     parser = argparse.ArgumentParser(description='Modelo de flocking con realismo aumentado (AgentPy).')
+    parser.add_argument('--animacion', nargs='?', const=300, type=int, metavar='PASOS',
+                        help='genera animacion.html con una animación con slider (300 pasos por defecto) y la abre')
     parser.add_argument('--pruebas', action='store_true', help='corre las pruebas de verificación')
     parser.add_argument('--experimentos', action='store_true', help='carga o corre los experimentos E1 a E6')
     parser.add_argument('--recalcular', action='store_true', help='vuelve a correr los experimentos aunque haya resultados guardados')
@@ -977,6 +1045,12 @@ def main():
     pd.set_option('display.width', 200)
     pd.set_option('display.max_colwidth', 90)
 
+    if args.animacion:
+        import webbrowser
+        archivo = os.path.abspath('animacion.html')
+        animar(ModeloExtendido, parametros_extendido, pasos=args.animacion, archivo=archivo)
+        print(f'Animación guardada en {archivo}')
+        webbrowser.open(f'file://{archivo}')
     if args.pruebas:
         print(ejecutar_pruebas().to_string())
     if args.experimentos:
@@ -987,7 +1061,7 @@ def main():
                         if c in resumen]
             print(f'\n== {nombre}: {len(resumen)} corridas')
             print(media_ic(resumen, 'config', columnas)[0].round(3).to_string())
-    if not (args.pruebas or args.experimentos):
+    if not (args.animacion or args.pruebas or args.experimentos):
         salida = ModeloExtendidoKPI(parametros_extendido).run(display=False)
         kpi = salida.variables.ModeloExtendidoKPI
         print(kpi.loc[kpi.index >= INICIO_PROMEDIO, ['polarizacion', 'dist_vecino', 'n_grupos', 'frac_grupo_mayor',

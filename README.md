@@ -27,6 +27,7 @@ flocking-realism-agentpy/
 ├── flocking_realism.ipynb   # Notebook con el modelo, los experimentos y el análisis
 ├── flocking_realism.py      # Solo el código del modelo, los KPIs, los experimentos y las pruebas
 ├── resultados/              # Resúmenes de los experimentos de la sección 6 (CSV)
+├── reporte.pdf              # Reporte del trabajo (4 páginas)
 ├── requirements.txt         # Dependencias con versiones fijas
 └── README.md
 ```
@@ -82,10 +83,14 @@ jupyter nbconvert --to notebook --execute flocking_realism.ipynb --output ejecut
 
 ```bash
 python flocking_realism.py                             # una corrida del modelo completo y sus KPIs
+python flocking_realism.py --animacion                 # animación con slider (300 pasos) en animacion.html
+python flocking_realism.py --animacion 1000            # la misma animación, con 1000 pasos
 python flocking_realism.py --pruebas                   # pruebas de verificación del código
 python flocking_realism.py --experimentos              # carga los experimentos E1 a E6 y muestra un resumen
 python flocking_realism.py --experimentos --recalcular # vuelve a correr los experimentos (~30 min)
 ```
+
+La animación es la misma de la sección 3.4 del notebook: un slider para recorrer los pasos, con la cámara siguiendo al grupo mayor, el color según el rol y la opacidad según la energía. Se guarda como página web y se abre en el navegador.
 
 También se puede importar:
 
