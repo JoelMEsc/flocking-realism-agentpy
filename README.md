@@ -75,7 +75,7 @@ jupyter nbconvert --to notebook --execute flocking_realism.ipynb --output ejecut
 
 **Tiempo de ejecución:** ~12 minutos en una computadora de 24 núcleos (las simulaciones con réplicas se reparten entre todos los núcleos disponibles).
 
-**Experimentos guardados:** los experimentos de la sección 6 suman 1520 corridas (~30 minutos). Sus resúmenes están en `resultados/` y el notebook los carga si existen. Para volver a correrlos, cambiar `RECALCULAR = False` a `True` en la celda de infraestructura de la sección 6.
+**Experimentos guardados:** los experimentos de la sección 6 suman 1640 corridas (~35 minutos). Sus resúmenes están en `resultados/` y el notebook los carga si existen. Para volver a correrlos, cambiar `RECALCULAR = False` a `True` en la celda de infraestructura de la sección 6.
 
 ### Solo el código
 
@@ -87,10 +87,10 @@ python flocking_realism.py --animacion                 # animación con slider (
 python flocking_realism.py --animacion 1000            # la misma animación, con 1000 pasos
 python flocking_realism.py --pruebas                   # pruebas de verificación del código
 python flocking_realism.py --experimentos              # carga los experimentos E1 a E6 y muestra un resumen
-python flocking_realism.py --experimentos --recalcular # vuelve a correr los experimentos (~30 min)
+python flocking_realism.py --experimentos --recalcular # vuelve a correr los experimentos (~35 min)
 ```
 
-La animación es la misma de la sección 3.4 del notebook: un slider para recorrer los pasos, con la cámara siguiendo al grupo mayor, el color según el rol y la opacidad según la energía. Se guarda como página web y se abre en el navegador.
+La animación es la misma de la sección 3.4 del notebook: un slider para recorrer los pasos, con una cámara fija que encuadra todo el recorrido, estelas con la trayectoria reciente de cada ave, el color según el rol y la opacidad según la energía. Se guarda como página web y se abre en el navegador.
 
 También se puede importar:
 

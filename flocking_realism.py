@@ -17,7 +17,7 @@ Uso desde la línea de comandos:
     python flocking_realism.py --animacion                 # animación con slider en animacion.html
     python flocking_realism.py --pruebas                   # pruebas de verificación del código
     python flocking_realism.py --experimentos              # carga los experimentos E1 a E6 y muestra un resumen
-    python flocking_realism.py --experimentos --recalcular # vuelve a correr los experimentos (~30 min)
+    python flocking_realism.py --experimentos --recalcular # vuelve a correr los experimentos (~35 min)
 
 Uso como módulo:
     from flocking_realism import ModeloExtendido, parametros_extendido
@@ -308,7 +308,7 @@ parametros_ref = {
     'population': 200,
     # Escala
     'dt': 0.1,                 # s por paso
-    'size': 200,               # m, lado del torus
+    'size': 3000,              # m, lado del torus: ninguna ave cruza el borde en 100 s
     'init_nnd': 1.0,           # m, distancia al vecino en la posición inicial
     'init_heading_sd': 16.4,   # grados, dispersión inicial de rumbos (None = rumbos aleatorios)
     'collision_distance': 0.38,  # m, distancia mínima observada entre aves
@@ -420,8 +420,17 @@ class BoidRoles(BoidPercepcion):
       rol. Así cualquier regla puede tener un valor distinto por rol sin cambiar
       su código, y ese valor se puede barrer en un experimento.
     - Los líderes son adultos informados: además de las reglas sociales, giran
-      hacia la dirección preferida del modelo con peso `goal_weight`
-      (Couzin et al., 2005). """
+      hacia la dirección preferida del modelo con un peso propio, que empieza en
+      `goal_weight` (Couzin et al., 2005).
+    - Con `goal_adapt_steps`, el peso de cada líder se ajusta como en la
+      retroalimentación de Couzin et al. (2005), pero solo cuando su parvada local
+      es estable. El líder recuerda la orientación media de sus vecinos durante los
+      últimos `goal_memory_steps` pasos; si en esa ventana cambió menos de
+      `goal_stability_angle` grados, la parvada es estable. Entonces, si el líder
+      vuela a menos de `goal_adapt_arc` grados de su dirección preferida, el peso
+      crece hasta `goal_weight`; si no, baja hasta 0 y el líder acepta el rumbo de
+      la parvada. El cambio completo, de `goal_weight` a 0, toma `goal_adapt_steps`
+      pasos. Mientras la orientación de los vecinos cambia, el peso no se modifica. """
 
     def setup(self):
         self.role = next(self.model.roles_por_asignar)
@@ -429,14 +438,46 @@ class BoidRoles(BoidPercepcion):
         propios = {k[:-len(sufijo)]: v for k, v in self.model.p.items() if k.endswith(sufijo)}
         self.p = ap.AttrDict({**self.model.p, **propios})
         super().setup()
+        self.peso_meta = self.p.goal_weight if self.role == 'lider' else 0.0
+        self.memoria_vecinos = []  # Orientación media de los vecinos en los últimos pasos (rad)
 
     def goal_force(self):
         """ Atracción hacia la dirección preferida (solo líderes), con la magnitud de la velocidad. """
-        if self.role != 'lider' or self.p.goal_weight == 0:
+        if self.role != 'lider' or self.peso_meta == 0:
             return np.zeros(self.p.ndim)
-        return self.p.goal_weight * self.speed * self.model.goal_dir
+        return self.peso_meta * self.speed * self.model.goal_dir
+
+    def parvada_estable(self):
+        """ Actualiza la memoria de la orientación media de los vecinos y dice si se mantuvo
+        dentro de `goal_stability_angle` grados durante toda la ventana de memoria. """
+        _, vel = self.vecinos()
+        if len(vel) == 0:
+            self.memoria_vecinos = []
+            return False
+        media = (vel / np.linalg.norm(vel, axis=1, keepdims=True)).mean(axis=0)
+        self.memoria_vecinos.append(np.arctan2(media[1], media[0]))
+        ventana = self.p.goal_memory_steps
+        self.memoria_vecinos = self.memoria_vecinos[-(ventana + 1):]
+        if len(self.memoria_vecinos) <= ventana:
+            return False  # Aún no hay suficiente memoria
+        diferencias = np.angle(np.exp(1j * (np.array(self.memoria_vecinos) - self.memoria_vecinos[-1])))
+        return np.degrees(np.abs(diferencias)).max() <= self.p.goal_stability_angle
+
+    def adaptar_peso(self):
+        """ Ajusta el peso de la dirección preferida (solo líderes, solo con la parvada local estable). """
+        pasos = self.p.get('goal_adapt_steps', None)
+        if self.role != 'lider' or not pasos:
+            return
+        if not self.parvada_estable():
+            return  # La orientación de los vecinos está cambiando: el líder conserva su peso
+        cambio = self.p.goal_weight / pasos
+        if self.heading @ self.model.goal_dir >= np.cos(np.radians(self.p.goal_adapt_arc)):
+            self.peso_meta = min(self.p.goal_weight, self.peso_meta + cambio)
+        else:
+            self.peso_meta = max(0.0, self.peso_meta - cambio)
 
     def social_force(self):
+        self.adaptar_peso()
         return super().social_force() + self.goal_force()
 
 class ModeloRoles(ModeloPercepcion):
@@ -476,7 +517,11 @@ parametros_roles = dict(
     parametros_percepcion,
     frac_lider=0.10,      # líderes informados (adultos)
     frac_juvenil=0.45,    # juveniles; el resto son adultos
-    goal_weight=0.05,     # peso de la dirección preferida (solo líderes)
+    goal_weight=0.05,     # peso inicial y máximo de la dirección preferida (solo líderes)
+    goal_adapt_steps=150,     # pasos para pasar del peso máximo a 0 (15 s)
+    goal_memory_steps=50,     # pasos que el líder recuerda la orientación de sus vecinos (5 s)
+    goal_stability_angle=10,  # grados: cambio máximo de esa orientación para considerar estable a la parvada
+    goal_adapt_arc=20,        # grados: vuela hacia su dirección preferida si está dentro de este arco
 )
 
 # ============================================================================
@@ -591,7 +636,7 @@ parametros_energia = dict(
     streak_max=2.0,           # multiplicador máximo por giros seguidos
     streak_tau=5,             # giros seguidos para acercarse al máximo
     # Recuperación
-    recovery_mean=1.26,       # calibrada en la sección 3.3
+    recovery_mean=1.28,       # calibrada en la sección 3.3
     recovery_cv=0.10,
     e_crit=0.3,               # energía bajo la cual baja la rapidez máxima
 )
@@ -606,56 +651,59 @@ parametros_extendido = dict(parametros_energia)
 COLORES_ROL = {'lider': 'tab:red', 'adulto': 'tab:blue', 'juvenil': 'tab:orange'}
 
 
-def centro_parvada(m):
-    """ Centro del grupo mayor en el torus: promedio de los desplazamientos desde una de sus aves. """
-    d = distancias_toroidales(m)
-    _, etiquetas = connected_components(csr_matrix(d < m.p.outer_radius), directed=False)
-    pos = np.array(list(m.space.positions.values()))
-    grupo = pos[etiquetas == np.bincount(etiquetas).argmax()]
-    return grupo[0] + desplazamiento_toroidal(grupo[0], grupo, m.p.size).mean(axis=0)
-
-
-def cuadro_parvada(m, ax, ventana=60):
-    """ Dibuja un paso de la simulación con una cámara que sigue al grupo mayor.
-    Color: rol del ave. Opacidad: energía (más transparente = más cansada). """
-    ax.clear()
-    centro = centro_parvada(m)
-    for rol, color in COLORES_ROL.items():
-        aves = [a for a in m.agents if getattr(a, 'role', 'adulto') == rol]
-        if not aves:
-            continue
-        rel = desplazamiento_toroidal(centro, np.array([a.pos for a in aves]), m.p.size)
-        rumbo = np.array([a.heading for a in aves])
-        energia = np.array([getattr(a, 'energy', 1.0) for a in aves])
-        ax.quiver(rel[:, 0], rel[:, 1], rumbo[:, 0], rumbo[:, 1], color=color, alpha=0.25 + 0.75 * energia,
-                  angles='xy', scale=45, width=0.005, label=rol)
-    kpi = metricas_parvada(m)
-    texto = f"t = {m.t * m.p.dt:.1f} s   polarización = {kpi['polarizacion']:.2f}   grupos = {kpi['n_grupos']}"
-    if hasattr(m.agents[0], 'energy'):
-        texto += f"   energía media = {np.mean([a.energy for a in m.agents]):.2f}"
-    ax.set(xlim=(-ventana, ventana), ylim=(-ventana, ventana), aspect='equal',
-           xlabel='m (relativo al centro del grupo mayor)', title=texto)
-    ax.legend(loc='upper right', fontsize=8)
-
-
-def animar(Modelo, parametros, pasos=300, cada=2, archivo=None):
+def animar(Modelo, parametros, pasos=300, cada=2, estela=15, archivo=None):
     """ Animación con slider (como la del ejemplo de AgentPy) de `pasos` pasos, dibujando uno de
-    cada `cada`. Devuelve el HTML; si se da `archivo`, también lo guarda como página web. """
+    cada `cada`. La cámara es fija y encuadra todo el recorrido; cada ave es una flecha en la
+    dirección en que vuela, con una estela de sus últimos `estela` cuadros. Color: rol.
+    Opacidad: energía (más transparente = más cansada). Devuelve el HTML; si se da
+    `archivo`, también lo guarda como página web. """
     import matplotlib.pyplot as plt
     from matplotlib import animation
 
     m = Modelo(dict(parametros, steps=pasos))
     m.sim_setup()
-    fig, ax = plt.subplots(figsize=(7, 7))
+    agentes = list(m.agents)
+    roles = np.array([getattr(a, 'role', 'adulto') for a in agentes])
 
-    def cuadro(i):
+    # Simular primero y guardar cada cuadro. Las posiciones se "desenvuelven" sumando
+    # desplazamientos, para que nunca salten aunque un ave cruce el borde del torus.
+    pos = np.array([a.pos for a in agentes], dtype=float)
+    cuadros = []
+    for i in range(pasos // cada + 1):
         if i > 0:
             for _ in range(cada):
                 if m.running:
+                    previas = np.array([a.pos for a in agentes])
                     m.sim_step()
-        cuadro_parvada(m, ax)
+                    pos = pos + desplazamiento_toroidal(previas, np.array([a.pos for a in agentes]), m.p.size)
+        kpi = metricas_parvada(m)
+        cuadros.append({'pos': pos.copy(), 'rumbo': np.array([a.heading for a in agentes]),
+                        'energia': np.array([getattr(a, 'energy', 1.0) for a in agentes]),
+                        'texto': f"t = {m.t * m.p.dt:.1f} s   polarización = {kpi['polarizacion']:.2f}   "
+                                 f"grupos = {kpi['n_grupos']}   aves en el mayor = {kpi['frac_grupo_mayor']:.0%}"})
 
-    anim = animation.FuncAnimation(fig, cuadro, frames=pasos // cada + 1, interval=50)
+    todas = np.concatenate([c['pos'] for c in cuadros])
+    centro, mitad = (todas.min(0) + todas.max(0)) / 2, (todas.max(0) - todas.min(0)).max() / 2 + 15
+    fig, ax = plt.subplots(figsize=(7.5, 7.5))
+
+    def dibujar(i):
+        ax.clear()
+        for rol, color in COLORES_ROL.items():
+            s = roles == rol
+            if not s.any():
+                continue
+            for j in np.where(s)[0]:
+                tramo = np.array([c['pos'][j] for c in cuadros[max(0, i - estela):i + 1]])
+                ax.plot(tramo[:, 0], tramo[:, 1], color=color, alpha=0.15, lw=0.8)
+            c = cuadros[i]
+            ax.quiver(c['pos'][s, 0], c['pos'][s, 1], c['rumbo'][s, 0], c['rumbo'][s, 1], color=color,
+                      alpha=0.3 + 0.7 * c['energia'][s], angles='xy', scale=50, width=0.004, label=rol)
+        ax.set(xlim=(centro[0] - mitad, centro[0] + mitad), ylim=(centro[1] - mitad, centro[1] + mitad),
+               aspect='equal', xlabel='x (m)', ylabel='y (m)')
+        ax.set_title(cuadros[i]['texto'], fontsize=9)
+        ax.legend(loc='upper right', fontsize=8)
+
+    anim = animation.FuncAnimation(fig, dibujar, frames=len(cuadros), interval=50)
     html = anim.to_jshtml(fps=20)
     plt.close(fig)
     if archivo:
@@ -706,6 +754,9 @@ def indicadores(m):
     if tiene_direccion:
         precision = rumbos @ m.goal_dir  # Coseno entre cada rumbo y la dirección preferida
         kpi['precision_rumbo'] = precision.mean()
+        lideres = [a for a in agentes if getattr(a, 'role', None) == 'lider']
+        if lideres:
+            kpi['peso_lideres'] = np.mean([a.peso_meta for a in lideres])
 
     if hasattr(agentes[0], 'role'):
         roles = np.array([a.role for a in agentes])
@@ -871,7 +922,7 @@ configs_e2 = {'Percepción': dict(parametros_percepcion, n_neighbors=ap.Values(3
                                  vision_angle=ap.Values(360, 300, 240))}
 
 configs_e3 = {'Liderazgo': dict(parametros_energia, frac_lider=ap.Values(0.02, 0.05, 0.1, 0.2),
-                                goal_weight=ap.Values(0.02, 0.05, 0.1, 0.2))}
+                                goal_adapt_steps=ap.Values(50, 150, 300, 1000))}
 
 configs_e4 = {'Rezagados': dict(parametros_energia, cohesion_strength=ap.Values(0.0025, 0.005, 0.01, 0.02),
                                 fatigue_scale=ap.Values(0.004, 0.008, 0.016))}
@@ -880,7 +931,8 @@ configs_e5 = {'Recuperación': dict(parametros_energia, recovery_cv=ap.Values(0.
 
 variaciones = {
     'inner_radius': None, 'separation_strength': None, 'cohesion_strength': None, 'alignment_strength': None,
-    'n_neighbors': (6, 8), 'vision_angle': None, 'goal_weight': None, 'frac_lider': None, 'frac_juvenil': None,
+    'n_neighbors': (6, 8), 'vision_angle': None, 'goal_weight': None, 'goal_adapt_steps': (120, 180),
+    'goal_memory_steps': (40, 60), 'goal_stability_angle': None, 'frac_lider': None, 'frac_juvenil': None,
     'fatigue_scale': None, 'recovery_mean': None, 'e_crit': None, 'max_load_factor': None,
 }
 configs_e6 = {'Base': parametros_energia}
@@ -928,8 +980,9 @@ def ejecutar_pruebas():
     m = ModeloReferencia(dict(parametros_ref, population=2))
     m.sim_setup()
     a, b = m.agents
-    m.space.move_to(a, np.array([0.5, 100.]))
-    m.space.move_to(b, np.array([199.5, 100.]))
+    L = m.p.size
+    m.space.move_to(a, np.array([0.5, L / 2]))
+    m.space.move_to(b, np.array([L - 0.5, L / 2]))
     prueba('Torus', 'Un vecino al otro lado del borde se detecta', len(a.space.neighbors(a, distance=2)) == 1)
 
     # 2. Cada etapa, con sus parámetros nuevos por defecto, reproduce exactamente a la anterior
@@ -980,7 +1033,42 @@ def ejecutar_pruebas():
     prueba('Roles', 'Un parámetro con sufijo __juvenil cambia solo a los juveniles',
            all((a.p.alignment_strength == 0.1) == (a.role == 'juvenil') for a in m.agents))
 
-    # 5. Funciones de costo
+    # 5. Adaptación de los líderes
+    def lider_de_prueba():
+        """ Un líder rodeado de 7 vecinos; su dirección preferida es perpendicular a su rumbo. """
+        m = ModeloRoles(dict(parametros_roles, population=8, frac_lider=1 / 8, frac_juvenil=0))
+        m.sim_setup()
+        lider = next(a for a in m.agents if a.role == 'lider')
+        otros = [a for a in m.agents if a is not lider]
+        centro = np.array([m.p.size / 2] * 2)
+        m.space.move_to(lider, centro.copy())
+        lider.heading = lider.velocity = np.array([1., 0.])
+        for k, a in enumerate(otros):
+            m.space.move_to(a, centro + 1.5 * np.array([np.cos(k), np.sin(k)]))
+        m.goal_dir = np.array([0., 1.])
+        return lider, otros
+
+    def orientar(aves, angulo):
+        for a in aves:
+            a.heading = a.velocity = np.array([np.cos(angulo), np.sin(angulo)])
+
+    ventana, pasos = parametros_roles['goal_memory_steps'], parametros_roles['goal_adapt_steps']
+    lider, otros = lider_de_prueba()
+    for k in range(ventana + pasos):
+        orientar(otros, np.radians(5 * k))  # Los vecinos giran 5° por paso
+        lider.adaptar_peso()
+    prueba('Roles', 'Si la orientación de los vecinos cambia, el peso del líder no cambia', lider.peso_meta == parametros_roles['goal_weight'])
+    lider, otros = lider_de_prueba()
+    orientar(otros, 0.0)  # Vecinos estables, lejos de la dirección preferida
+    for _ in range(ventana):
+        lider.adaptar_peso()
+    sin_cambio = lider.peso_meta == parametros_roles['goal_weight']
+    for _ in range(pasos):
+        lider.adaptar_peso()
+    prueba('Roles', 'Con la orientación de los vecinos estable, el peso se mantiene mientras se llena la memoria y luego baja a 0 en goal_adapt_steps pasos',
+           sin_cambio and np.isclose(lider.peso_meta, 0))
+
+    # 6. Funciones de costo
     prueba('Energía', 'Costo por rapidez: 1 a 10 m/s, 0,835 a 6,3 m/s y 1,196 a 14,4 m/s',
            np.allclose([costo_rapidez(10), costo_rapidez(6.3), costo_rapidez(14.4)], [1, 0.835, 1.196], atol=1e-3))
     prueba('Energía', 'Costo por giro: 1 en vuelo recto y 4 con un giro de 2 g',
@@ -993,7 +1081,7 @@ def ejecutar_pruebas():
     prueba('Energía', 'Recuperación individual con la media y la variación indicadas (±5% y ±0,03)',
            abs(r.mean() / parametros_energia['recovery_mean'] - 1) < 0.05 and abs(r.std() / r.mean() - parametros_energia['recovery_cv']) < 0.03)
 
-    # 6. Invariantes del modelo completo durante 500 pasos
+    # 7. Invariantes del modelo completo durante 500 pasos
     m = ModeloEnergia(dict(parametros_energia, steps=500))
     m.sim_setup()
     a_max = G * np.sqrt(m.p.max_load_factor ** 2 - 1)
@@ -1015,7 +1103,7 @@ def ejecutar_pruebas():
     prueba('Invariantes', 'El rumbo siempre mide 1', ok_rumbo)
     prueba('Invariantes', 'Las posiciones quedan dentro del torus', ok_pos)
 
-    # 7. Reproducibilidad del modelo completo
+    # 8. Reproducibilidad del modelo completo
     def posiciones_finales(semilla):
         m = ModeloEnergia(dict(parametros_energia, steps=200, seed=semilla))
         m.run(display=False)
