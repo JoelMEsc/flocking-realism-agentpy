@@ -12,3 +12,6 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# Animación generada por flocking_realism.py --animacion
+animacion.html
