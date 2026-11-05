@@ -25,6 +25,7 @@ El trabajo completo está en el notebook `flocking_realism.ipynb`:
 ```
 flocking-realism-agentpy/
 ├── flocking_realism.ipynb   # Notebook con el modelo, los experimentos y el análisis
+├── flocking_realism.py      # Solo el código del modelo, los KPIs, los experimentos y las pruebas
 ├── resultados/              # Resúmenes de los experimentos de la sección 6 (CSV)
 ├── requirements.txt         # Dependencias con versiones fijas
 └── README.md
@@ -74,6 +75,24 @@ jupyter nbconvert --to notebook --execute flocking_realism.ipynb --output ejecut
 **Tiempo de ejecución:** ~12 minutos en una computadora de 24 núcleos (las simulaciones con réplicas se reparten entre todos los núcleos disponibles).
 
 **Experimentos guardados:** los experimentos de la sección 6 suman 1520 corridas (~30 minutos). Sus resúmenes están en `resultados/` y el notebook los carga si existen. Para volver a correrlos, cambiar `RECALCULAR = False` a `True` en la celda de infraestructura de la sección 6.
+
+### Solo el código
+
+`flocking_realism.py` contiene el mismo código del notebook (modelo base, modelo extendido por etapas, KPIs, configuraciones de los experimentos y pruebas), sin el análisis ni las figuras. Se genera a partir de las celdas del notebook, que es la fuente.
+
+```bash
+python flocking_realism.py                             # una corrida del modelo completo y sus KPIs
+python flocking_realism.py --pruebas                   # pruebas de verificación del código
+python flocking_realism.py --experimentos              # carga los experimentos E1 a E6 y muestra un resumen
+python flocking_realism.py --experimentos --recalcular # vuelve a correr los experimentos (~30 min)
+```
+
+También se puede importar:
+
+```python
+from flocking_realism import ModeloExtendido, parametros_extendido
+salida = ModeloExtendido(parametros_extendido).run()
+```
 
 ## Reproducibilidad
 
