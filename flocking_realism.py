@@ -179,7 +179,9 @@ class BoidReferencia(ap.Agent):
     - Dirección (`heading`) y rapidez (`speed`) separadas; `velocity` = heading × speed.
     - Giro máximo por paso, limitado por el factor de carga máximo del vuelo.
     - Vecindad en un torus: las reglas usan el desplazamiento más corto.
-    - Sin regla de bordes, porque el torus no tiene paredes. """
+    - Sin regla de bordes, porque el torus no tiene paredes.
+    - Ruido opcional en la dirección deseada (`heading_noise`).
+    - Forma de la separación (`separation_shape`): la del modelo base o una que crece al acercarse. """
 
     def setup(self):
         sd = self.p.get('init_heading_sd', None)
@@ -214,6 +216,11 @@ class BoidReferencia(ap.Agent):
         disp = desplazamiento_toroidal(self.pos, np.array(nbs.pos), self.p.size)
         return disp, np.array(nbs.velocity)
 
+    def vecinos_cohesion(self, disp):
+        """ Desplazamientos hacia los vecinos que atraen al ave (regla de cohesión).
+        En la referencia, los mismos vecinos que usan las demás reglas. """
+        return disp
+
     def social_force(self):
         """ Suma de las reglas de cohesión, separación y alineación. """
         disp, vel = self.vecinos()
@@ -223,15 +230,47 @@ class BoidReferencia(ap.Agent):
         dist = np.linalg.norm(disp, axis=1)
 
         # Regla 1 - Cohesión: hacia el centro de los vecinos
-        force += disp.mean(axis=0) * self.p.cohesion_strength
+        force += self.vecinos_cohesion(disp).mean(axis=0) * self.p.cohesion_strength
         # Regla 2 - Separación: alejarse de los vecinos dentro de inner_radius
-        force -= disp[dist < self.p.inner_radius].sum(axis=0) * self.p.separation_strength
+        cerca = dist < self.p.inner_radius
+        forma = self.p.get('separation_shape', 'lineal')
+        if forma == 'inversa':
+            # Empuje inverso al cuadrado de la distancia
+            empuje = disp[cerca] / np.maximum(dist[cerca], 0.05)[:, None] ** 2
+        elif forma == 'resorte':
+            # Empuje que crece linealmente al acercarse: 0 en inner_radius y máximo en contacto
+            unitario = disp[cerca] / np.maximum(dist[cerca], 0.05)[:, None]
+            empuje = unitario * (1 - dist[cerca] / self.p.inner_radius)[:, None]
+        else:
+            # Modelo base: proporcional al desplazamiento (empuja más cuanto más lejos)
+            empuje = disp[cerca]
+        force -= empuje.sum(axis=0) * self.p.separation_strength
         # Regla 3 - Alineación: igualar la velocidad promedio de los vecinos
         force += (vel.mean(axis=0) - self.velocity) * self.p.alignment_strength
         return force
 
-    def update_velocity(self):
+    def direccion_deseada(self):
+        """ Velocidad deseada: la actual más las fuerzas sociales. Con `heading_noise` > 0, su
+        dirección se desvía de la que piden las reglas, lo que representa los errores de
+        percepción y de control del vuelo. El desvío es un proceso de Ornstein-Uhlenbeck:
+        tiene desviación estándar `heading_noise` grados y cambia suavemente, con tiempo de
+        correlación `heading_noise_tau` segundos. En cada paso, la dirección deseada se gira
+        solo el cambio del desvío desde el paso anterior; como la velocidad deseada incluye
+        la velocidad actual, la desviación acumulada respecto de las reglas es el desvío
+        mismo, y no crece sin límite. Así cada ave se desvía en curvas suaves. """
         deseada = self.velocity + self.social_force()
+        ruido = self.p.get('heading_noise', 0)
+        if ruido:
+            memoria = np.exp(-self.p.dt / self.p.heading_noise_tau)
+            previo = getattr(self, 'desvio', 0.0)
+            self.desvio = previo * memoria + ruido * np.sqrt(1 - memoria ** 2) * self.model.nprandom.normal()
+            angulo = np.radians(self.desvio - previo)
+            c, s = np.cos(angulo), np.sin(angulo)
+            deseada = np.array([c * deseada[0] - s * deseada[1], s * deseada[0] + c * deseada[1]])
+        return deseada
+
+    def update_velocity(self):
+        deseada = self.direccion_deseada()
         self.heading, self.turn = rotar_hacia(self.heading, deseada, self.max_turn())
         self.velocity = self.heading * self.speed
 
@@ -315,6 +354,8 @@ parametros_ref = {
     # Vuelo
     'speed_pref': 1.0,         # m/paso (= 10 m/s)
     'max_load_factor': 2.0,    # g
+    'heading_noise': 15,       # grados, desviación estándar del desvío de dirección
+    'heading_noise_tau': 10,   # s, tiempo de correlación del desvío
     # Reglas
     'inner_radius': 1.0,         # m, calibrado en la sección 4.1
     'outer_radius': 10,        # m
@@ -335,8 +376,11 @@ class BoidPercepcion(BoidReferencia):
     - responde solo a sus `n_neighbors` vecinos visibles más cercanos
       (interacción topológica). Con `n_neighbors = None` responde a todos.
 
-    Con vision_angle = 360, n_neighbors = None y vision_radius = outer_radius
-    se comporta exactamente igual que BoidReferencia. """
+    - Con `cohesion_neighbors`, la regla de cohesión usa sus `cohesion_neighbors`
+      vecinos visibles más cercanos, en lugar de los `n_neighbors` de las demás reglas.
+
+    Con vision_angle = 360, n_neighbors = None, vision_radius = outer_radius y sin
+    cohesion_neighbors se comporta exactamente igual que BoidReferencia. """
 
     def vecinos(self):
         p = self.p
@@ -345,6 +389,21 @@ class BoidPercepcion(BoidReferencia):
         k = p.get('n_neighbors', None)
         if k is None and angulo >= 360 and radio == p.outer_radius:
             return super().vecinos()
+        return self.visibles(k)
+
+    def vecinos_cohesion(self, disp):
+        k = self.p.get('cohesion_neighbors', None)
+        if k is None:
+            return disp
+        disp_cohesion, _ = self.visibles(k)
+        return disp_cohesion if len(disp_cohesion) else disp
+
+    def visibles(self, k):
+        """ Los `k` vecinos visibles más cercanos (todos los visibles si `k` es None):
+        desplazamientos hacia ellos y sus velocidades. """
+        p = self.p
+        radio = p.get('vision_radius', p.outer_radius)
+        angulo = p.get('vision_angle', 360)
 
         tree = self.space.kdtree
         agentes = self.space._sorted_agents  # Agentes en el orden de los puntos del árbol k-d
@@ -392,6 +451,7 @@ parametros_percepcion = dict(
     vision_radius=50,   # m
     vision_angle=300,   # grados; punto ciego trasero de 60°
     n_neighbors=7,      # vecinos con los que interactúa cada ave
+    cohesion_neighbors=20,  # vecinos que atraen al ave (regla de cohesión)
 )
 
 # ============================================================================
@@ -486,7 +546,11 @@ class ModeloRoles(ModeloPercepcion):
     Las proporciones son exactas: `frac_lider` y `frac_juvenil` fijan cuántas aves
     tiene cada rol y el resto son adultos; el orden se baraja con el generador del
     modelo. Si hay líderes, el modelo elige al azar una dirección preferida
-    (`goal_dir`), común a todos ellos y fija durante la corrida. """
+    (`goal_dir`), común a todos ellos. Con `goal_change_interval`, la dirección
+    preferida cambia a intervalos aleatorios (exponenciales, con media de
+    `goal_change_interval` pasos): gira un ángulo uniforme entre ±`goal_change_angle`
+    grados, y los líderes recuperan su peso máximo y reinician su memoria, porque
+    tienen información nueva. Sin `goal_change_interval`, la dirección es fija. """
 
     agent_class = BoidRoles
 
@@ -503,6 +567,24 @@ class ModeloRoles(ModeloPercepcion):
         if self.conteo_roles['lider'] > 0:
             angulo = self.random.uniform(0, 2 * np.pi)
             self.goal_dir = np.array([np.cos(angulo), np.sin(angulo)])
+            if self.p.get('goal_change_interval', None):
+                self.proximo_cambio = self.siguiente_cambio()
+
+    def siguiente_cambio(self):
+        return self.t + max(1, int(round(self.nprandom.exponential(self.p.goal_change_interval))))
+
+    def step(self):
+        super().step()
+        if hasattr(self, 'proximo_cambio') and self.t >= self.proximo_cambio:
+            giro = np.radians(self.random.uniform(-self.p.goal_change_angle, self.p.goal_change_angle))
+            c, s = np.cos(giro), np.sin(giro)
+            self.goal_dir = np.array([c * self.goal_dir[0] - s * self.goal_dir[1],
+                                      s * self.goal_dir[0] + c * self.goal_dir[1]])
+            for a in self.agents:
+                if a.role == 'lider':
+                    a.peso_meta = a.p.goal_weight
+                    a.memoria_vecinos = []
+            self.proximo_cambio = self.siguiente_cambio()
 
 
 class ModeloRolesConDatos(ModeloRoles):
@@ -572,7 +654,7 @@ class BoidEnergia(BoidRoles):
         return v_min + (v_max - v_min) * fraccion
 
     def update_velocity(self):
-        deseada = self.velocity + self.social_force()
+        deseada = self.direccion_deseada()
         self.heading, self.turn = rotar_hacia(self.heading, deseada, self.max_turn())
 
         # Rapidez: la que piden las reglas, más una tendencia hacia la preferida
@@ -629,14 +711,14 @@ parametros_energia = dict(
     v_max=1.5,                # m/paso (15 m/s)
     speed_relax=0.1,          # tendencia a volver a speed_pref
     # Gasto
-    fatigue_scale=0.008,      # compresión del tiempo de fatiga
+    fatigue_scale=0.006,      # compresión del tiempo de fatiga
     cost_factor=1.0,
     cost_factor__juvenil=1.14,
     turn_threshold=5,         # grados por paso para contar en la racha
     streak_max=2.0,           # multiplicador máximo por giros seguidos
     streak_tau=5,             # giros seguidos para acercarse al máximo
     # Recuperación
-    recovery_mean=1.28,       # calibrada en la sección 3.3
+    recovery_mean=1.78,       # calibrada en la sección 3.3
     recovery_cv=0.10,
     e_crit=0.3,               # energía bajo la cual baja la rapidez máxima
 )
@@ -907,7 +989,7 @@ def media_ic(resumen, por, columnas):
     return media, mitad
 
 # Configuraciones de los experimentos E1 a E6
-percepcion_referencia = dict(n_neighbors=None, vision_angle=360, vision_radius=10)
+percepcion_referencia = dict(n_neighbors=None, vision_angle=360, vision_radius=10, cohesion_neighbors=None)
 
 configs_e1 = {
     'Referencia': parametros_ref,
@@ -925,12 +1007,13 @@ configs_e3 = {'Liderazgo': dict(parametros_energia, frac_lider=ap.Values(0.02, 0
                                 goal_adapt_steps=ap.Values(50, 150, 300, 1000))}
 
 configs_e4 = {'Rezagados': dict(parametros_energia, cohesion_strength=ap.Values(0.0025, 0.005, 0.01, 0.02),
-                                fatigue_scale=ap.Values(0.004, 0.008, 0.016))}
+                                fatigue_scale=ap.Values(0.003, 0.006, 0.012))}
 
 configs_e5 = {'Recuperación': dict(parametros_energia, recovery_cv=ap.Values(0.0, 0.1, 0.2))}
 
 variaciones = {
     'inner_radius': None, 'separation_strength': None, 'cohesion_strength': None, 'alignment_strength': None,
+    'heading_noise': None, 'heading_noise_tau': None, 'cohesion_neighbors': (16, 24),
     'n_neighbors': (6, 8), 'vision_angle': None, 'goal_weight': None, 'goal_adapt_steps': (120, 180),
     'goal_memory_steps': (40, 60), 'goal_stability_angle': None, 'frac_lider': None, 'frac_juvenil': None,
     'fatigue_scale': None, 'recovery_mean': None, 'e_crit': None, 'max_load_factor': None,
@@ -1110,6 +1193,40 @@ def ejecutar_pruebas():
         return np.array(list(m.space.positions.values()))
     prueba('Reproducibilidad', 'La misma semilla da exactamente el mismo resultado', np.array_equal(posiciones_finales(1), posiciones_finales(1)))
     prueba('Reproducibilidad', 'Una semilla distinta da otro resultado', not np.array_equal(posiciones_finales(1), posiciones_finales(2)))
+
+    # 9. Ruido de dirección, cohesión ampliada y cambios de dirección de los líderes
+    m = ModeloReferencia(dict(parametros_ref, steps=400))
+    m.run(display=False)
+    desvios = np.array([a.desvio for a in m.agents])
+    prueba('Ruido', f'El desvío de dirección tiene desviación estándar ≈ {parametros_ref["heading_noise"]}° y no se acumula (±20%)',
+           abs(desvios.std() / parametros_ref['heading_noise'] - 1) < 0.2 and np.abs(desvios).max() < 6 * parametros_ref['heading_noise'])
+
+    p = parametros_percepcion
+    m = ModeloPercepcion(p)
+    m.sim_setup()
+    for _ in range(50):
+        m.sim_step()
+    ave = m.agents[0]
+    pos = np.array(list(m.space.positions.values()))
+    disp = desplazamiento_toroidal(ave.pos, pos, p['size'])
+    dist = np.linalg.norm(disp, axis=1)
+    visible = ((dist > 0) & (dist <= p['vision_radius'])
+               & (disp @ ave.heading / np.maximum(dist, 1e-12) >= np.cos(np.radians(p['vision_angle'] / 2))))
+    esperadas = np.sort(dist[visible])[:p['cohesion_neighbors']]
+    obtenidas = np.sort(np.linalg.norm(ave.vecinos_cohesion(ave.vecinos()[0]), axis=1))
+    prueba('Percepción', f'La cohesión usa los {p["cohesion_neighbors"]} vecinos visibles más cercanos', np.allclose(esperadas, obtenidas))
+
+    m = ModeloRoles(dict(parametros_roles, goal_change_interval=5, goal_change_angle=60))
+    m.sim_setup()
+    previa, cambio = m.goal_dir.copy(), m.proximo_cambio
+    lideres = [a for a in m.agents if a.role == 'lider']
+    for a in lideres:
+        a.peso_meta = 0.0
+    while m.t < cambio:
+        m.sim_step()
+    angulo = np.degrees(np.arccos(np.clip(previa @ m.goal_dir, -1, 1)))
+    prueba('Roles', 'Al cambiar la dirección preferida, gira como máximo goal_change_angle y los líderes recuperan su peso',
+           angulo <= 60 + 1e-9 and all(a.peso_meta == a.p.goal_weight for a in lideres))
 
     resultado_pruebas = pd.DataFrame(pruebas)
     assert (resultado_pruebas.resultado == 'pasa').all(), 'Hay pruebas que fallan'
